@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict
 
 from astrbot.api import logger
-from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.event import AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 
 
@@ -36,12 +36,14 @@ class ChatCSVLogger(Star):
         self._csv_base_dir = os.path.join(base_dir, "chatcsv")
         self._global_init_lock = asyncio.Lock()
         self._file_locks: Dict[str, asyncio.Lock] = {}
+        self._event_listener_registered = False
+        self._event_listener_token: Any = None
 
     async def initialize(self) -> None:
         """保证 CSV 路径存在并写入表头。"""
         await asyncio.to_thread(self._ensure_dir_ready, self._csv_base_dir)
+        self._register_message_listener()
 
-    @filter.on(AstrMessageEvent)
     async def record_message(self, event: AstrMessageEvent):
         """捕获所有消息事件并追加到 CSV。"""
         try:
@@ -73,6 +75,7 @@ class ChatCSVLogger(Star):
 
     async def terminate(self) -> None:
         """插件卸载时无需额外清理。"""
+        self._unregister_message_listener()
 
     async def _append_row(self, file_path: str, row: list[str]) -> None:
         lock = await self._get_file_lock(file_path)
@@ -138,3 +141,84 @@ class ChatCSVLogger(Star):
             return ""
         text = re.sub(r"[^\w.-]", "_", text)
         return text[:100]
+
+    def _register_message_listener(self) -> None:
+        if self._event_listener_registered:
+            return
+        event_bus = getattr(self.context, "event_bus", None)
+        if event_bus is None:
+            logger.warning("无法获取 event_bus，消息记录功能不可用。")
+            return
+
+        listener = self._make_bus_listener()
+        token = None
+        registered = False
+
+        for method_name in ("subscribe", "listen", "register", "add_listener", "on"):
+            hook = getattr(event_bus, method_name, None)
+            if callable(hook):
+                try:
+                    token = hook(AstrMessageEvent, listener)
+                    registered = True
+                    break
+                except TypeError:
+                    try:
+                        token = hook(listener, AstrMessageEvent)
+                        registered = True
+                        break
+                    except TypeError:
+                        continue
+
+        if not registered:
+            logger.warning("event_bus 未提供兼容的注册方法，无法监听消息事件。")
+            return
+
+        self._event_listener_registered = True
+        self._event_listener_token = (listener, token)
+        logger.info("ChatCSVLogger 已订阅 AstrMessageEvent。")
+
+    def _unregister_message_listener(self) -> None:
+        if not self._event_listener_registered:
+            return
+        event_bus = getattr(self.context, "event_bus", None)
+        if event_bus is None:
+            return
+
+        listener, token = self._event_listener_token
+        removed = False
+
+        for method_name in ("unsubscribe", "unlisten", "deregister", "remove_listener", "off"):
+            unhook = getattr(event_bus, method_name, None)
+            if callable(unhook):
+                try:
+                    if token is not None:
+                        unhook(token)
+                    else:
+                        unhook(AstrMessageEvent, listener)
+                    removed = True
+                    break
+                except TypeError:
+                    try:
+                        unhook(listener, AstrMessageEvent)
+                        removed = True
+                        break
+                    except TypeError:
+                        continue
+
+        if not removed:
+            logger.debug("未找到 event_bus 的卸载方法，可能不需要显式注销监听。")
+
+        self._event_listener_registered = False
+        self._event_listener_token = None
+
+    def _make_bus_listener(self):
+        def listener(event: AstrMessageEvent):
+            try:
+                coro = self.record_message(event)
+                if asyncio.iscoroutine(coro):
+                    return asyncio.create_task(coro)
+            except Exception:
+                logger.exception("调度消息记录任务失败。")
+            return None
+
+        return listener
