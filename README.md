@@ -1,22 +1,20 @@
 ## Chat CSV Logger
 
-将所有 AstrBot 会话消息实时记录到 CSV 文件，方便进行数据分析或备份。
+将 AstrBot 群聊消息实时记录到 CSV 文件，方便进行数据分析或备份。
 
 ### 功能特性
 
-- 自动监听所有 `AstrMessageEvent` 消息
+- 自动监听所有群聊消息
 - 首次运行自动创建 CSV 并写入表头
 - 记录时间戳、平台、会话、消息 ID、群组 ID、发送者 ID/昵称及消息文本
-- 群聊按 `group_id` 分目录存储，私聊按会话/发送者拆分
+- 群聊按 `group_id` 分目录存储
 - 使用异步锁防止并发写入导致的数据损坏
 
 ### 部署与使用
 
 1. 将插件放置在 AstrBot 的 `data/plugins/astrbot_plugin_chatcsv` 目录下。
 2. 启动 AstrBot 并在 WebUI 插件管理中启用本插件。
-3. CSV 文件默认保存在 AstrBot 数据目录下的 `chatcsv/` 目录：
-   - 群聊：`chatcsv/groups/<group_id>/chat_history.csv`
-   - 私聊：`chatcsv/privates/<session_or_sender>/chat_history.csv`
+3. CSV 文件默认保存在 AstrBot 数据目录 `data/plugin_data/chatcsv/groups/<group_id>/chat_history.csv`。
 
 ### CSV 字段说明
 
