@@ -2,6 +2,7 @@ import asyncio
 import csv
 import os
 import re
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict
@@ -45,6 +46,8 @@ class ChatCSVLogger(Star):
         self._csv_base_dir = base_dir / "plugin_data" / "chatcsv" / "groups"
         self._global_init_lock = asyncio.Lock()
         self._file_locks: Dict[str, asyncio.Lock] = {}
+        self._zip_lock = asyncio.Lock()
+        self._zip_pending = False
 
     async def initialize(self) -> None:
         """保证 CSV 路径存在并写入表头。"""
@@ -96,6 +99,7 @@ class ChatCSVLogger(Star):
         lock = await self._get_file_lock(str(file_path))
         async with lock:
             await asyncio.to_thread(self._write_row, file_path, row)
+        await self._package_groups_zip()
 
     def _write_row(self, file_path: Path, row: list[str]) -> None:
         with file_path.open(mode="a", newline="", encoding="utf-8") as csv_file:
@@ -120,9 +124,9 @@ class ChatCSVLogger(Star):
             return repr(value)
 
     def _prepare_csv_path(self, group_id: Any) -> Path:
-        folder = self._csv_base_dir / self._sanitize_component(group_id)
-        file_path = folder / "chat_history.csv"
-        folder.mkdir(parents=True, exist_ok=True)
+        sanitized = self._sanitize_component(group_id) or "unknown_group"
+        file_path = self._csv_base_dir / f"{sanitized}.csv"
+        self._csv_base_dir.mkdir(parents=True, exist_ok=True)
         if not file_path.exists():
             with file_path.open(mode="w", newline="", encoding="utf-8-sig") as csv_file:
                 writer = csv.writer(csv_file)
@@ -136,6 +140,33 @@ class ChatCSVLogger(Star):
             return lock
         async with self._global_init_lock:
             return self._file_locks.setdefault(file_path, asyncio.Lock())
+
+    async def _package_groups_zip(self) -> None:
+        self._zip_pending = True
+        if self._zip_lock.locked():
+            return
+        async with self._zip_lock:
+            while self._zip_pending:
+                self._zip_pending = False
+                try:
+                    await asyncio.to_thread(self._create_groups_zip)
+                except Exception as exc:
+                    logger.exception("打包群聊 CSV 失败: %s", exc)
+                    break
+
+    def _create_groups_zip(self) -> None:
+        if not self._csv_base_dir.exists():
+            return
+        target_zip = self._csv_base_dir.parent / "groups.zip"
+        temp_zip = target_zip.with_suffix(".tmp.zip")
+        with zipfile.ZipFile(temp_zip, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for root, _, files in os.walk(self._csv_base_dir):
+                for file_name in files:
+                    file_path = Path(root) / file_name
+                    arcname = Path("groups") / file_path.relative_to(self._csv_base_dir)
+                    archive.write(file_path, arcname.as_posix())
+        temp_zip.replace(target_zip)
+        logger.info("已更新群聊 ZIP: %s", target_zip)
 
     @staticmethod
     def _sanitize_component(value: Any) -> str:
